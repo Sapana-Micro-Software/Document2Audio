@@ -98,28 +98,6 @@ done
 update_progress_bar $image_count $image_count "PNG to Text OCR"
 echo "\nOCR completed. Text saved in $TEXT_DIR\n"
 
-# Function to clean and split text by sections
-process_text() {
-    local input_dir="$1"
-    local output_dir="$2"
-    local section_number=1
-
-    for text_file in "$input_dir"/*.txt; do
-        while IFS= read -r line; do
-            # Check for section headers (customize this regex as needed)
-            if [[ "$line" =~ ^[A-Z][A-Za-z0-9\ ]+$ ]]; then
-                section_title=$(echo "$line" | tr ' ' '_')
-                section_file="$output_dir/section_$(printf "%010d" $section_number)_${section_title}.txt"
-                section_number=$((section_number + 1))
-            fi
-            echo "$line" >> "$section_file"
-        done < "$text_file"
-    done
-}
-
-# Process the text files
-process_text "$TEXT_DIR" "$OUTPUT_DIR"
-
 # Create a new playlist file
 echo "Creating playlist file $PLAYLIST_FILE"
 echo "#EXTM3U" > "$PLAYLIST_FILE"
@@ -155,7 +133,7 @@ for text_file in "$TEXT_DIR"/page_*.txt; do
 
     # Update progress bar based on completed files
     completed_files=$(ls "$OUTPUT_DIR"/*.opus 2>/dev/null | wc -l)
-    update_progress_bar $completed_files $page_count "Text to Audio Conversion"
+    #update_progress_bar $current_page $page_count "Text to Audio Conversion"
 
     # Add audio file to playlist
     echo "#EXTINF:-1,Page $page_number" >> "$PLAYLIST_FILE"
