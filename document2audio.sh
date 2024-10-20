@@ -144,4 +144,4 @@ done
 wait
 
 update_progress_bar $page_count $page_count "Text to Audio Conversion"
-echo -ne "\nConversion complete. Playlist created: $PLAYLIST_FILE\n"
+echo "\nConversion complete. Playlist created: $PLAYLIST_FILE\n"
