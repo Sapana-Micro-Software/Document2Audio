@@ -19,12 +19,20 @@
 #!/bin/bash
 
 # Check if the correct number of arguments is provided
-if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 <PDF_FILE>"
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 <PDF_FILE> [--verbose]"
     exit 1
 fi
 
 PDF_FILE="$1"
+VERBOSE=false
+MAX_CONCURRENT_JOBS=4
+
+# Check for the verbose flag
+if [ "$#" -eq 2 ] && [ "$2" == "--verbose" ]; then
+    VERBOSE=true
+fi
+
 OUTPUT_DIR="${PDF_FILE%.*}_audio"
 IMAGE_DIR="${PDF_FILE%.*}_images"
 TEXT_DIR="${PDF_FILE%.*}_text"
@@ -36,19 +44,59 @@ mkdir -p "$OUTPUT_DIR" "$IMAGE_DIR" "$TEXT_DIR"
 echo "Starting conversion process for $PDF_FILE"
 echo "Output directories created at $OUTPUT_DIR, $IMAGE_DIR, and $TEXT_DIR"
 
+# Function to update the progress bar
+update_progress_bar() {
+    local current=$1
+    local total=$2
+    local title=$3
+    local bar_length=50
+    local progress=$((current * 100 / total))
+    local filled_length=$((progress * bar_length / 100))
+    local bar=$(printf "%-${bar_length}s" "#" | sed "s/ /#/g")
+    local empty=$(printf "%-${bar_length}s" " " | sed "s/ / /g")
+    tput civis  # Hide cursor
+    printf "\r%s: [%-${bar_length}s] %d%%" "$title" "${bar:0:filled_length}${empty:filled_length}" "$progress"
+    tput cnorm  # Show cursor
+}
+
 # Convert PDF to PNG images
 echo "Converting PDF to PNG images..."
-magick -density 300 "$PDF_FILE" "$IMAGE_DIR/page_%03d.png"
-echo "PDF conversion to images completed. Images saved in $IMAGE_DIR"
+page_count=$(pdfinfo "$PDF_FILE" | grep Pages | awk '{print $2}')
+for ((page=0; page<page_count; page++)); do
+    output_file="$IMAGE_DIR/page_$(printf "%03d" $page).png"
+    if [ "$VERBOSE" = true ]; then
+        magick -density 300 "$PDF_FILE[$page]" "$output_file" &
+    else
+        magick -quiet -density 300 "$PDF_FILE[$page]" "$output_file" &
+    fi
+    pid=$!
+    current_progress=0
+    update_progress_bar $page $page_count "Converting Page $((page + 1))/$((page_count)) to PNG"
+    while kill -0 $pid 2>/dev/null; do
+        if [ -f "$output_file" ]; then
+            break
+        fi
+        if [ $current_progress -ge 100 ]; then
+            current_progress=0
+        fi
+    done
+    update_progress_bar $page+1 $page_count "Converting Page $((page + 1))/$((page_count)) to PNG"
+done
+echo "\nPDF conversion to images completed. Images saved in $IMAGE_DIR\n"
 
 # Perform OCR on each image
 echo "Performing OCR on images..."
+image_count=$(ls "$IMAGE_DIR"/*.png | wc -l)
+current_image=0
 for image_file in "$IMAGE_DIR"/*.png; do
     base_name=$(basename "$image_file" .png)
-    text_file="$TEXT_DIR/${base_name}.txt"
-    tesseract "$image_file" "$text_file" --psm 1
-    echo "OCR completed for $image_file. Text saved to $text_file"
+    text_file="$TEXT_DIR/${base_name}"
+    tesseract "$image_file" "$text_file" --psm 1 &> /dev/null
+    current_image=$((current_image + 1))
+    update_progress_bar $current_image $image_count "PNG to Text OCR"
 done
+update_progress_bar $image_count $image_count "PNG to Text OCR"
+echo "\nOCR completed. Text saved in $TEXT_DIR\n"
 
 # Function to clean and split text by sections
 process_text() {
@@ -56,21 +104,17 @@ process_text() {
     local output_dir="$2"
     local section_number=1
 
-    echo "Processing text to identify sections..."
     for text_file in "$input_dir"/*.txt; do
         while IFS= read -r line; do
             # Check for section headers (customize this regex as needed)
             if [[ "$line" =~ ^[A-Z][A-Za-z0-9\ ]+$ ]]; then
                 section_title=$(echo "$line" | tr ' ' '_')
                 section_file="$output_dir/section_$(printf "%010d" $section_number)_${section_title}.txt"
-                echo "Processing section: $section_title"
                 section_number=$((section_number + 1))
             fi
-            # Append line to the current section file
             echo "$line" >> "$section_file"
         done < "$text_file"
     done
-    echo "Text processing completed. Sections saved in $output_dir"
 }
 
 # Process the text files
@@ -80,36 +124,46 @@ process_text "$TEXT_DIR" "$OUTPUT_DIR"
 echo "Creating playlist file $PLAYLIST_FILE"
 echo "#EXTM3U" > "$PLAYLIST_FILE"
 
-# Convert each section to audio and add to playlist
-section_count=$(ls "$OUTPUT_DIR"/section_*.txt | wc -l)
-current_section=0
+# Convert each page's text to audio and add to playlist
+current_page=0
+active_jobs=0
+pids=()
 
-for section_file in "$OUTPUT_DIR"/section_*.txt; do
-    section_title=$(basename "$section_file" .txt)
-    audio_file="$OUTPUT_DIR/${section_title}.aiff"
+for text_file in "$TEXT_DIR"/page_*.txt; do
+    page_number=$(basename "$text_file" .txt | sed 's/page_//')
+    audio_file="$OUTPUT_DIR/page_${page_number}.aiff"
 
-    echo "Converting section $section_title to audio..."
-    # Convert text to audio
-    say -o "$audio_file" "$(<"$section_file")"
-    echo "Audio file created: $audio_file"
+    # Run the say command in the background
+    say -o "$audio_file" "$(<"$text_file")" &
+    pids+=($!)
+    active_jobs=$((active_jobs + 1))
+    current_page=$((current_page + 1))
+
+    # Wait for some jobs to finish if the limit is reached
+    if [ "$active_jobs" -ge "$MAX_CONCURRENT_JOBS" ]; then
+        while [ "$active_jobs" -ge "$MAX_CONCURRENT_JOBS" ]; do
+            for pid in "${pids[@]}"; do
+                if ! kill -0 $pid 2>/dev/null; then
+                    active_jobs=$((active_jobs - 1))
+                    pids=(${pids[@]/$pid})
+                fi
+            done
+            sleep 0.1
+            update_progress_bar $current_page $page_count "Text to Audio Conversion"
+        done
+    fi
+
+    # Update progress bar based on completed files
+    completed_files=$(ls "$OUTPUT_DIR"/*.opus 2>/dev/null | wc -l)
+    update_progress_bar $completed_files $page_count "Text to Audio Conversion"
 
     # Add audio file to playlist
-    echo "Adding $audio_file to playlist"
-    echo "#EXTINF:-1,$section_title" >> "$PLAYLIST_FILE"
+    echo "#EXTINF:-1,Page $page_number" >> "$PLAYLIST_FILE"
     echo "$audio_file" >> "$PLAYLIST_FILE"
-
-    # Update progress bar
-    current_section=$((current_section + 1))
-    progress=$((current_section * 100 / section_count))
-    echo -ne "Progress: ["
-    for ((i = 0; i < 50; i++)); do
-        if [ $((i * 2)) -lt $progress ]; then
-            echo -ne "#"
-        else
-            echo -ne " "
-        fi
-    done
-    echo -ne "] $progress% \r"
 done
 
+# Wait for all background processes to complete
+wait
+
+update_progress_bar $page_count $page_count "Text to Audio Conversion"
 echo -ne "\nConversion complete. Playlist created: $PLAYLIST_FILE\n"
