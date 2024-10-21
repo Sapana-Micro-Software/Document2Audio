@@ -1,4 +1,4 @@
-# Document2Audio
+# Document2Audio: A document to audio conversion tool for MacOS
 Document2Audio: A conversion shell script that converts a PDF to PNG to TEXT (with OCR) to AIFF in one script with a single command to create a M3U playlist for VLC and Mplayer playback.
 
 # Abstract:
